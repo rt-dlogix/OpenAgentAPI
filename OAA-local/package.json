@@ -1,0 +1,20 @@
+{
+  "name": "oaa",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OAA-local —— 电脑端凭据采集：本地多平台多账号登录态读取、保存与推送到 OAA-server",
+  "type": "module",
+  "bin": {
+    "harvest": "bin/harvest.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "detect": "node bin/harvest.js detect",
+    "scan": "node bin/harvest.js scan",
+    "list": "node bin/harvest.js list",
+    "push": "node bin/harvest.js push"
+  },
+  "license": "MIT"
+}

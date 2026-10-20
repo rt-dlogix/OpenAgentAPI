@@ -1,0 +1,22 @@
+# OAA-server — 多提供商本地网关（headless 服务端）
+#
+# 本目录只包含服务端运行所需的最小集合：
+#   · server/  —— 网关本体（Rust：多家 provider 适配、账号池、面板后端）
+#   · ui/      —— 面板前端构建产物（容器直接 COPY）
+#
+# 许可：MIT 正文 + 使用声明（禁商用 / 二次分发牟利 / 批量账号运营），见 LICENSE。
+#
+# 本文件是 cargo **虚拟 workspace 根**，只声明成员与 release profile。
+# 说明：[profile.release] 必须在 workspace 根提供 —— 写在成员 crate 里会被忽略。
+# resolver = "2" 与原仓库（根是 edition 2021 的 package）的推导结果一致。
+
+[workspace]
+resolver = "2"
+members = ["server"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

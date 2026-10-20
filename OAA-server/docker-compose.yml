@@ -1,0 +1,32 @@
+# OAA-server 部署（单容器，管理面与网关面分端口）
+#
+#   docker compose up -d --build
+#
+#   网关     http://<主机>:3065/v1 （API Key 在面板「网关 Key」页创建；对外只暴露这个）
+#   面板     http://<主机>:3066    （首次打开注册管理员账号；界面 + /api/*）
+#
+# 数据全部落在 ./data 一个目录里（SQLite + 各渠道凭据）⇒ 重建容器不用重新登录。
+#
+# 分端口：3065 = 网关面（/v1/* + /health，对外只暴露这一个）；
+#         3066 = 面板面（界面 + /api/*，默认只绑回环，留在内网）。
+# 要改端口/绑定地址就直接改下面的字面值（本文件刻意不用 .env 变量，保持简单）。
+#
+# 需要把面板留在内网时，用 deploy/docker/compose.yaml 那套加固版
+# （默认只绑回环 + 只读根文件系统）。
+
+services:
+  oaa-server:
+    build: .
+    image: oaa-server:local
+    container_name: oaa-server
+    restart: unless-stopped
+    ports:
+      # 网关面：隧道 / 反向代理 / 防火墙只映射这一条
+      - "3065:3065"
+      # 面板面：只绑宿主机回环；同内网访问才把 127.0.0.1 改成宿主机内网地址
+      - "127.0.0.1:3066:3066"
+    environment:
+      # 面板分端口：管理面（界面 + /api/*）单独监听，主端口只留 /v1/*
+      OAA_PANEL_PORT: "3066"
+    volumes:
+      - ./data:/data

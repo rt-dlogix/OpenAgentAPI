@@ -1,0 +1,54 @@
+# OAA-server 加固版部署（与上游 deploy/docker 同一套习惯）
+#
+# 用法（在本目录）：
+#   cp .env.example .env      # 按需填写；全留空也能起（走面板首次注册）
+#   docker compose -f deploy/docker/compose.yaml up -d --build
+#
+# 与根目录 docker-compose.yml 的差异：
+#   · 数据用**命名卷**（而非 ./data 绑定挂载）
+#   · 容器加固（只读根文件系统、丢弃全部 capability、内存与进程数上限）
+#   · 默认只绑 127.0.0.1（要暴露局域网/公网时改 .env 里的 OAA_BIND_ADDRESS）
+#
+# 分端口部署（默认开启）：管理面与网关面拆成两个端口 ——
+#   · 3065 = 网关面（/v1/* + /health）：公网 / 隧道 / 防火墙只映射这一个；
+#   · 3066 = 面板面（界面 + /api/*）：默认只绑回环，留在内网或私网。
+# 注意：/api/* 只在 3066 上，OAA-local 的 push --endpoint 必须指向 3066。
+
+services:
+  oaa-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: "${OAA_IMAGE:-oaa-server:local}"
+    container_name: oaa-server
+    restart: unless-stopped
+    ports:
+      # 网关面：对外（隧道 / 反向代理 / 防火墙）只映射这一条
+      - "${OAA_BIND_ADDRESS:-127.0.0.1}:3065:3065"
+      # 面板面：默认只绑宿主机回环；同内网访问才改 .env 里的 OAA_PANEL_BIND_ADDRESS
+      - "${OAA_PANEL_BIND_ADDRESS:-127.0.0.1}:${OAA_PANEL_PORT:-3066}:${OAA_PANEL_PORT:-3066}"
+    environment:
+      OAA_HOST: "0.0.0.0"
+      # 面板分端口：管理面（界面 + /api/*）单独监听，主端口只留 /v1/*
+      OAA_PANEL_PORT: "${OAA_PANEL_PORT:-3066}"
+      OAA_PROXY_HOME: "/data"
+      OAA_UI_DIR: "/app/ui"
+      # 面板管理员：留空 = 启动后在面板注册（推荐）；填了 = 跳过注册
+      OAA_ADMIN_USER: ${OAA_ADMIN_USER:-}
+      OAA_ADMIN_PASSWORD: ${OAA_ADMIN_PASSWORD:-}
+      # 登录页人机验证：默认 1 开启，0 关闭
+      OAA_CAPTCHA_ENABLED: "${OAA_CAPTCHA_ENABLED:-1}"
+    volumes:
+      - oaa-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
+    pids_limit: 512
+
+volumes:
+  oaa-data:

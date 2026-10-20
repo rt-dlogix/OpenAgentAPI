@@ -1,0 +1,33 @@
+# 依赖与构建产物 / Dependencies & build artifacts
+node_modules/
+target/
+dist/
+build/
+out/
+
+# 运行数据（含明文凭据，务必不要提交）/ Runtime data (plaintext credentials — never commit)
+data/
+.env
+.env.*
+!.env.example
+accounts.json
+accounts.server.json
+*.db
+*.sqlite
+*.sqlite3
+
+# 文档草稿 / Draft docs (not shipping source)
+doc/
+
+# 系统 / 编辑器 / 工具垃圾 / OS, editor & tool junk
+.acl-recovery/
+.DS_Store
+Thumbs.db
+*.log
+*.bak
+*.tmp
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

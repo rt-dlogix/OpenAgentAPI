@@ -1,0 +1,48 @@
+OAA-local 商业许可（专有许可 · All Rights Reserved）
+=====================================================
+
+版权所有 (c) 2026 T.sl。保留所有权利。
+
+本许可适用于 OAA-local 目录下由版权方**原创**的全部内容（下称「本软件」）。
+本软件中源自第三方的部分不受本许可约束，其许可与版权声明见同目录
+`THIRD-PARTY-NOTICES.md`，该文件必须随本软件一并保留。
+
+────────────────────────────────────────────────────────────
+授权条件（未经版权方事先书面授权，禁止下列行为）
+────────────────────────────────────────────────────────────
+
+1. 复制、分发、公开发布、转售本软件或其衍生作品（源代码或二进制形式均包含）；
+2. 将本软件用于**商业用途** —— 包括但不限于打包出售、付费分发、
+   作为付费服务或付费产品的组成部分；
+3. 移除、篡改本文件、任何版权声明或 `THIRD-PARTY-NOTICES.md`。
+
+经版权方书面授权后使用本软件的，除遵守本许可外，还须遵守
+`THIRD-PARTY-NOTICES.md` 中列明的第三方许可条款。
+
+────────────────────────────────────────────────────────────
+免责声明
+────────────────────────────────────────────────────────────
+
+本软件按「现状」提供，不附带任何明示或默示的担保，包括但不限于对适销性、
+特定用途适用性及不侵权的担保。在任何情况下，版权方均不对因本软件或本软件的
+使用或其他处置而产生的任何索赔、损害或其他责任承担义务，无论其基于合同、
+侵权行为还是其他事由。
+
+────────────────────────────────────────────────────────────
+English (Summary)
+────────────────────────────────────────────────────────────
+
+Copyright (c) 2026 <Licensor>. All rights reserved.
+
+This license covers the original contents of the OAA-local directory (the
+"Software"). Portions of the Software derived from third-party projects are
+governed by their own licenses as stated in `THIRD-PARTY-NOTICES.md`, which
+must be retained together with the Software.
+
+No permission is granted to copy, distribute, publish, sublicense or sell the
+Software, or to use it for any commercial purpose, without the prior written
+consent of the Licensor.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE.

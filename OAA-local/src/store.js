@@ -1,0 +1,167 @@
+// 提取自 CreditDaddy (https://github.com/techysy/CreditDaddy) src/store.js，MIT License。
+// 本地账号存储 — 数据全部留在本机。写入采用原子写（临时文件 + rename）避免中断损坏。
+//
+// 目录：$OAA_HOME（默认 ~/.oaa）
+//   accounts.json  账号列表（含 token，0600 权限）
+//
+// 原项目中的 settings.json / state.json / 迁移逻辑 / 网页会话字段等与「凭据采集」无关的部分已剔除。
+
+import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import { PROVIDERS, productOf } from './constants.js';
+
+export function dataDir() {
+  const explicit = process.env.OAA_HOME;
+  if (explicit) return explicit;
+  return path.join(os.homedir(), '.oaa');
+}
+
+const ACCOUNTS_FILE = () => path.join(dataDir(), 'accounts.json');
+
+async function ensureDir() {
+  await fs.mkdir(dataDir(), { recursive: true, mode: 0o700 });
+}
+
+// Windows 上 rename 覆盖已有文件时，外部程序瞬时占用会抛 EPERM/EBUSY/EACCES：
+// 先按递增间隔重试，仍失败则兜底直写目标（牺牲原子性换可用性）。
+const RENAME_TRANSIENT = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let renameImpl = null;
+export function _setRenameForTests(fn) { renameImpl = fn || null; }
+
+/** 原子写：临时文件 + rename（带故障重试与直写兜底） */
+export async function atomicWrite(file, content, { retries = 6 } = {}) {
+  const tmp = path.join(
+    path.dirname(file),
+    `.tmp-${path.basename(file)}-${crypto.randomBytes(4).toString('hex')}`
+  );
+  await fs.writeFile(tmp, content, { mode: 0o600 });
+  const doRename = renameImpl || ((a, b) => fs.rename(a, b));
+  try {
+    for (let i = 0; i <= retries; i++) {
+      try { await doRename(tmp, file); return; } catch (e) {
+        if (!RENAME_TRANSIENT.has(e?.code)) throw e;
+        if (i < retries) await sleep(120 * (i + 1));
+      }
+    }
+  } catch { /* 落入兜底 */ }
+  try {
+    const data = await fs.readFile(tmp, 'utf8');
+    await fs.writeFile(file, data, { mode: 0o600 });
+  } finally {
+    await fs.unlink(tmp).catch(() => {});
+  }
+}
+
+async function readJson(file, fallback) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return fallback;
+    throw new Error(`读取 ${file} 失败: ${e.message}`);
+  }
+}
+
+// ─── 账号 ───
+
+export async function loadAccounts() {
+  const list = await readJson(ACCOUNTS_FILE(), []);
+  return Array.isArray(list) ? list : [];
+}
+
+export async function saveAccounts(accounts) {
+  await ensureDir();
+  await atomicWrite(ACCOUNTS_FILE(), JSON.stringify(accounts, null, 2));
+}
+
+// 进程内串行队列：所有「读-改-写」都经由 withAccounts，避免并发调用互相覆盖
+let accountsQueue = Promise.resolve();
+
+/** 串行地读取 → 修改 → 保存账号列表。fn 可直接修改传入的数组（或返回新数组）。 */
+export function withAccounts(fn) {
+  const run = accountsQueue.then(async () => {
+    const accounts = await loadAccounts();
+    const result = await fn(accounts);
+    await saveAccounts(accounts);
+    return result;
+  });
+  accountsQueue = run.catch(() => {});
+  return run;
+}
+
+export function newId() {
+  return crypto.randomUUID();
+}
+
+const optStr = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+/** 过期时间统一成 ISO 字符串（接受 ISO / 秒 / 毫秒） */
+export function normalizeExpiry(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : /^\d+$/.test(String(v)) ? Number(v) : NaN;
+  const d = Number.isFinite(n) ? new Date(n < 1e12 ? n * 1000 : n) : new Date(String(v));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/**
+ * 校验并构造账号记录（不含重复检查，由调用方负责）。
+ * @param {{name?, provider, token, uid?, email?, refreshToken?, expiresAt?, source?, meta?}} input
+ */
+export function normalizeAccountInput({ name, provider, token, uid, email, refreshToken, expiresAt, source, meta }) {
+  if (!PROVIDERS.includes(provider)) {
+    throw new Error(`provider 必须是 ${PROVIDERS.join(' 或 ')}`);
+  }
+  const trimmed = String(token || '').trim();
+  if (!trimmed) throw new Error('token 不能为空');
+  return {
+    id: newId(),
+    name: String(name || '').trim() || null,
+    provider,
+    token: trimmed,
+    uid: optStr(uid),
+    email: optStr(email),
+    refreshToken: optStr(refreshToken),
+    expiresAt: normalizeExpiry(expiresAt),
+    source: optStr(source) || 'manual',
+    meta: meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {},
+    createdAt: new Date().toISOString(),
+  };
+}
+
+/** 相同 provider 下 token 相同、或 uid 相同（同一用户换了新 token）视为同一账号 */
+export function findDuplicate(accounts, provider, token, uid = null) {
+  const t = String(token || '').trim();
+  return accounts.find((a) => a.provider === provider && (a.token === t || (uid && a.uid && a.uid === uid)));
+}
+
+export function maskToken(token) {
+  if (typeof token !== 'string' || token.length < 12) return '***';
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+const maskPhone = (p) => (typeof p === 'string' && p.length >= 7 ? p.slice(0, 3) + '****' + p.slice(-4) : null);
+
+/** 对外输出的脱敏账号视图（不含 token 原文） */
+export function publicAccount(a) {
+  const meta = a.meta || {};
+  return {
+    id: a.id,
+    name: a.name,
+    provider: a.provider,
+    product: productOf(a.provider),
+    tokenMasked: maskToken(a.token),
+    isPat: typeof a.token === 'string' && a.token.startsWith('pt-'),
+    uid: a.uid || null,
+    email: a.email || null,
+    expiresAt: a.expiresAt || null,
+    hasRefreshToken: Boolean(a.refreshToken),
+    source: a.source || 'manual',
+    phone: maskPhone(meta.phone),
+    domain: meta.domain || null,
+    createdAt: a.createdAt,
+  };
+}
