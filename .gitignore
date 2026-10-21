@@ -19,6 +19,9 @@ accounts.server.json
 # 文档草稿 / Draft docs (not shipping source)
 doc/
 
+# 本地验证脚本（无头 Chrome 跑 UI 改动，非发布内容）/ Local UI verification harness (not shipping source)
+.verify-ui/
+
 # 系统 / 编辑器 / 工具垃圾 / OS, editor & tool junk
 .acl-recovery/
 .DS_Store

@@ -12,7 +12,7 @@ Entry point: `node OAA-local/bin/harvest.js <command>`. Five commands: `detect` 
 | `scan [--save] [--json] [--reveal] [--no-legacy] [--legacy-provider <p>]` | Read the locally logged-in accounts (decrypt each client's credentials) |
 | `list [--json]` | List the accounts already saved to the local account store (tokens masked) |
 | `push [--endpoint <url>] [--key <k>] [--only <p1,p2>] [--dry-run] [--timeout <ms>] [--no-health]` | Push the local accounts to the OAA-server gateway |
-| `export [--out <file>] [--json]` | Export to a file directly usable by OAA-server's panel "Import Accounts" |
+| `export [--out <file>] [--json]` | Export to a file directly usable by OAA-server's panel "Import Accounts" / "Add Account → Import" |
 
 ### scan options
 
@@ -50,6 +50,25 @@ selected directly on the panel under "Settings → Data → Import Accounts". It
 `push` requires the gateway to be online and carry a Key, sending each entry via `POST /api/accounts`; `export` only writes a
 file and can be produced offline — suitable for manual import or migrating to another machine. Both use the **same provider
 mapping**; accounts that are unsupported / lack a uid are likewise skipped with a reason.
+
+### Importing a file on the panel (two entry points, same file)
+
+The `export` output can be imported from two places on the panel; both go through the same endpoint
+`POST /api/accounts/import` (merge semantics: matched by identity, updated on hit, appended otherwise):
+
+| Entry point | Where | Notes |
+|---|---|---|
+| "Add Account" dialog → **Import** segment | Accounts page → "Add Account" → fourth segment "Import" (导入) | Pick a file → tick the entries in the preview → "Import selected"; never leaves the dialog |
+| "Import Accounts" button | Settings → Data | Picks a file and submits it whole (the older entry point, unchanged) |
+
+Both only accept **the server's own export format** (top-level object + `accounts` array, flattened records).
+The file can come from the panel's "Export Accounts" or from `node OAA-local/bin/harvest.js export` — the structure is identical.
+
+> Why a whole file instead of pasting credentials per platform: the harvester's Qoder record is a **device-flow**
+> credential (`accessToken` = `dt-…`, `refreshToken` = `drt-…`), while Qoder's "Enter credentials" form only accepts a
+> PAT generated on the website (`pt-…`). The two formats are incompatible, so platforms like Qoder **stay as they are**
+> rather than being forced into the credential form; its device-flow record simply rides along in the imported file, and
+> the server fills in the missing `machineId` automatically and refreshes the `drt-` token via the device endpoint.
 
 ---
 
@@ -158,6 +177,7 @@ Account-store record structure: `id / name / provider / token / uid / email / re
 | mirasim / minimax skipped | No such provider in the gateway's registry; expected |
 | Trae forwards 401 after a while | This tool **deliberately does not save** Trae's refreshToken (saving it would kick your IDE offline) — it's a short-lived credential: re-log in to Trae → `scan --save` → `push` |
 | Panel "Import Accounts" reports "operation failed: import content must be a JSON object" | The selected file is an **array** at top level (e.g. the harvester's `~/.oaa/accounts.json`). This entry only eats the server's own export format (top-level object + `accounts` array + top-level `accessToken`): use the file produced by `harvest.js export`, or switch to `push` |
+| "Add Account → Import" shows no preview rows after picking a file | The file isn't in the panel export format: the panel reports the reason in place (a top-level array directly suggests using `harvest.js export`). The local account store `~/.oaa/accounts.json` is an array and can't be selected directly |
 | Push succeeds but the panel shows nothing | The panel loads asynchronously — refresh once; or confirm you pushed to the same gateway instance |
 
 ---

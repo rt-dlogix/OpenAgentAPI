@@ -12,7 +12,7 @@
 | `scan [--save] [--json] [--reveal] [--no-legacy] [--legacy-provider <p>]` | 读取本机已登录账号（解密各客户端凭据） |
 | `list [--json]` | 列出已保存到本地账号库的账号（token 脱敏） |
 | `push [--endpoint <url>] [--key <k>] [--only <p1,p2>] [--dry-run] [--timeout <ms>] [--no-health]` | 把本地账号推送到 OAA-server 网关 |
-| `export [--out <file>] [--json]` | 导出成 OAA-server 面板「导入账号」可直接选用的文件 |
+| `export [--out <file>] [--json]` | 导出成 OAA-server 面板「导入账号」/「添加账号 → 导入」可直接选用的文件 |
 
 ### scan 选项
 
@@ -49,6 +49,23 @@
 「设置 → 数据 → 导入账号」里直接选用。它与 `push` 的区别只在通道：`push` 需要网关在线并带 Key，
 逐条走 `POST /api/accounts`；`export` 只写一个文件，离线也能产出，适合手动导入或换机迁移。
 两者用的是**同一套 provider 映射**，不支持 / 缺 uid 的账号同样会被跳过并给出原因。
+
+### 在面板里导入文件（两个入口，认的是同一份文件）
+
+`export` 的产物可以在面板里从两处导入，都走同一个接口 `POST /api/accounts/import`（merge 语义：按身份匹配，命中更新、未命中追加）：
+
+| 入口 | 位置 | 说明 |
+|---|---|---|
+| 「添加账号」弹窗 → **导入** 分段 | 账号页「添加账号」→ 分段控件第四项「导入」 | 选文件 → 逐条勾选预览 → 「导入所选」；不离开弹窗就能导入 |
+| 「导入账号」按钮 | 设置 → 数据 | 选文件后直接整份提交（旧入口，行为不变） |
+
+两个入口都只吃**服务端自己的导出格式**（顶层对象 + `accounts` 数组、记录平铺）。文件的来源可以是面板
+「导出账号」，也可以是 `node OAA-local/bin/harvest.js export` —— 两者结构一致。
+
+> 为什么要走「整份文件」而不是逐平台粘贴凭证：采集器导出的 Qoder 记录是**设备流**凭证
+> （`accessToken` = `dt-…`、`refreshToken` = `drt-…`），而 Qoder 的「填写凭证」表单只收官网生成的
+> PAT（`pt-…`）。两者格式不通，所以 Qoder 这类平台**保持原样**、不硬塞进凭证表单；
+> 它的设备流记录随文件导入即可，服务端会自动补齐缺失的 `machineId` 并用 `drt-` 走设备刷新端点。
 
 ---
 
@@ -156,6 +173,7 @@ $ node OAA-local/bin/harvest.js push --dry-run
 | mirasim / minimax 被跳过 | 网关注册表里没有这两家 provider，属预期 |
 | Trae 一段时间后转发 401 | 本工具**故意不保存** Trae 的 refreshToken（保存会让你的 IDE 掉线），属短期凭据：重新登录 Trae → `scan --save` → `push` |
 | 面板「导入账号」报「操作失败：导入内容必须是 JSON 对象」 | 选的文件顶层是**数组**（如采集器的 `~/.oaa/accounts.json`）。该入口只吃服务端自己的导出格式（顶层对象 + `accounts` 数组 + 顶层 `accessToken`）：改用 `harvest.js export` 产出的文件，或改走 `push` |
+| 「添加账号 → 导入」选完文件没有预览行 | 文件不是面板导出格式：面板会就地报原因（顶层数组会直接提示改用 `harvest.js export`）。本地账号库 `~/.oaa/accounts.json` 是数组，不能直接选 |
 | 推送成功但面板看不到 | 面板异步加载，刷新一次；或确认推的是同一台网关实例 |
 
 ---
