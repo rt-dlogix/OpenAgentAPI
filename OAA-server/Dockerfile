@@ -14,6 +14,35 @@ ARG HTTPS_PROXY=""
 # TARGETARCH 由 buildx/BuildKit 自动注入：amd64 / arm64。它是预置 ARG，
 # 阶段内要用必须重新声明，否则恒为空串（会导致 arm64 分支永不命中）。
 ARG TARGETARCH
+
+# ── 配置华为云 Debian apt 源（替换官方 deb.debian.org）──
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources \
+    && printf '%s\n' \
+        'deb https://mirrors.huaweicloud.com/debian/ bookworm main contrib non-free non-free-firmware' \
+        'deb https://mirrors.huaweicloud.com/debian/ bookworm-updates main contrib non-free non-free-firmware' \
+        'deb https://mirrors.huaweicloud.com/debian-security/ bookworm-security main contrib non-free non-free-firmware' \
+        > /etc/apt/sources.list
+
+# ── 配置华为云 Cargo sparse 镜像源（关键修复点）──
+# 注意：Cargo 1.70+ 使用 sparse 协议时，registry 字段直接填索引根地址即可，
+# 无需额外配置 index 字段。同时显式 proxy = false 避免与镜像源冲突。
+RUN mkdir -p /root/.cargo \
+    && printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "huaweicloud"' \
+        '' \
+        '[source.huaweicloud]' \
+        'registry = "https://mirrors.huaweicloud.com/repository/rust/crates-io"' \
+        '' \
+        '[http]' \
+        'proxy = false' \
+        '' \
+        '[net]' \
+        'git-fetch-with-cli = true' \
+        'retry = 3' \
+        > /root/.cargo/config.toml \
+    && cat /root/.cargo/config.toml
+
 # arm64 需要 aarch64 的 C 工具链与 glibc 开发头文件（rusqlite bundled 的
 # SQLite、ring 的 C/汇编源码用）。
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
@@ -53,7 +82,15 @@ RUN find server/src -type f -exec touch {} + \
 
 # ── 运行时 ──────────────────────────────────────────────────
 FROM debian:bookworm-slim
-RUN apt-get update \
+
+# 注意：slim 镜像无 ca-certificates，apt 源必须用 http:// 而非 https://
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources \
+    && printf '%s\n' \
+        'deb http://mirrors.huaweicloud.com/debian/ bookworm main contrib non-free non-free-firmware' \
+        'deb http://mirrors.huaweicloud.com/debian/ bookworm-updates main contrib non-free non-free-firmware' \
+        'deb http://mirrors.huaweicloud.com/debian-security/ bookworm-security main contrib non-free non-free-firmware' \
+        > /etc/apt/sources.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
