@@ -38,15 +38,53 @@ fn is_api_path(path: &str) -> bool {
 }
 
 /// 静态服务入口：`ui_dir` 已就绪时尝试出文件，失败回到 404 兜底。
-pub async fn serve(request: Request<Body>, ui_dir: PathBuf) -> AxumResponse {
+///
+/// `gateway_port` 是**网关面**实际监听的端口：分端口部署时它与面板端口
+/// 不同（面板 `OAA_PANEL_PORT`，网关 `OAA_PROXY_PORT`），而界面里
+/// 「OpenAI 端点」那行提示必须给出网关端口 —— 否则用户照着面板地址
+/// 拼出的 base_url 会打到面板端口上，`/v1/*` 在那里根本不存在。
+pub async fn serve(request: Request<Body>, ui_dir: PathBuf, gateway_port: u16) -> AxumResponse {
     let path = request.uri().path().to_string();
     if is_api_path(&path) {
         return not_found(request).await;
     }
+    let origin = gateway_origin(&request, gateway_port);
     match resolve_file(&ui_dir, &path) {
-        Some(file_path) => read_response(&file_path).await,
+        Some(file_path) => read_response(&file_path, &origin).await,
         None => not_found(request).await,
     }
+}
+
+/// 拼出「浏览器该用的网关源」（`http://host:port`）。
+///
+/// 主机名取自请求的 `Host` 头（用户实际是从哪个地址打开面板的），端口换成
+/// 网关端口 —— 反向代理 / 局域网 IP / localhost 都能得到能直接用的地址，
+/// 不必猜部署形态。取不到 Host 时退回 `127.0.0.1`。
+fn gateway_origin(request: &Request<Body>, gateway_port: u16) -> String {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    // Host 可能带端口（`192.168.1.19:3066`、IPv6 的 `[::1]:3066`）：只留主机名
+    let name = if host.starts_with('[') {
+        match host.find(']') {
+            Some(end) => &host[..=end],
+            None => "",
+        }
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    // 注入的是内联脚本，主机名只保留合法字符，杜绝引号 / 尖括号逃逸
+    let name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+        .collect();
+    if name.is_empty() {
+        return format!("http://127.0.0.1:{gateway_port}");
+    }
+    format!("http://{name}:{gateway_port}")
 }
 
 /// 把 URL 路径解析到 `ui/` 内的具体文件（`None` = 不存在 / 非法）。
@@ -95,21 +133,19 @@ fn resolve_file(ui_dir: &PathBuf, url_path: &str) -> Option<PathBuf> {
 
 /// 读文件并组装响应；读失败（权限等）按 404 处理（不区分 404/403，
 /// 面板资源缺失的唯一正确动作就是「当它不存在」）。
-async fn read_response(file_path: &PathBuf) -> AxumResponse {
+async fn read_response(file_path: &PathBuf, origin: &str) -> AxumResponse {
     let bytes = match tokio::fs::read(file_path).await {
         Ok(bytes) => bytes,
         Err(_) => {
             return errors::not_found_response("GET", "static");
         }
     };
-    let is_index = file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "index.html");
-    let body = if is_index {
-        inject_web_shim(&bytes)
-    } else {
-        bytes
+    let file_name = file_path.file_name().and_then(|name| name.to_str());
+    let body = match file_name {
+        Some("index.html") => inject_web_shim(&bytes, origin),
+        // 界面脚本里的「OpenAI 端点」提示是按面板地址拼的，换掉它
+        Some("ui.js") => inject_gateway_origin(&bytes),
+        _ => bytes,
     };
     let mime = mime_of(file_path);
     let response = Response::builder()
@@ -120,19 +156,70 @@ async fn read_response(file_path: &PathBuf) -> AxumResponse {
     response.unwrap_or_else(|_| errors::not_found_response("GET", "static"))
 }
 
+/// 网关源在页面里的全局名：`window.__OAA_GATEWAY_ORIGIN__`。
+///
+/// index.html 里定义、ui.js 里读 —— 两处注入用的是同一个值，所以界面
+/// 展示的地址与实际可达的 `/v1` 地址必然一致。
+const GATEWAY_ORIGIN_GLOBAL: &str = "__OAA_GATEWAY_ORIGIN__";
+
+/// 界面脚本里的占位片段：原代码用面板 origin 拼端点，这里换成网关 origin。
+const UI_ORIGIN_PLACEHOLDER: &str = "${window.location.origin}/v1";
+
+/// 把 ui.js 里「OpenAI 端点」那行的面板 origin 换成注入的网关 origin。
+///
+/// 只在命中占位片段时改动（`ui.js` 里该片段恰好出现一次）；没命中就原样
+/// 返回 —— 界面换了版本也不至于因此坏掉，最多回到旧的展示行为。
+///
+/// 这里换的是**取值表达式**而不是端口字面量：真正的地址由 index.html 里
+/// 注入的全局给出，脚本读一次即可 —— 所以本函数不需要 origin 入参。
+fn inject_gateway_origin(js: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(js) else {
+        return js.to_vec();
+    };
+    let replacement = format!("${{window.{GATEWAY_ORIGIN_GLOBAL}||window.location.origin}}/v1");
+    match text.replacen(UI_ORIGIN_PLACEHOLDER, &replacement, 1) {
+        replaced if replaced != text => replaced.into_bytes(),
+        _ => js.to_vec(),
+    }
+}
+
 /// 把网页端桥接注入 index.html：`<head>` 开标签后插一段内联脚本，
 /// 使 `window.workbuddyDesktop` 在所有界面脚本之前就绪
-/// （与桌面壳 bridge.rs 的「页面脚本执行前注入」同一时序保证）。
-fn inject_web_shim(html: &[u8]) -> Vec<u8> {
+/// （与桌面壳 bridge.rs 的「页面脚本执行前注入」同一时序保证），
+/// 同时先落下网关 origin 供界面脚本读取。
+fn inject_web_shim(html: &[u8], origin: &str) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(html) else {
         return html.to_vec();
     };
-    let shim = format!("<script>{}</script>", crate::web_shim::shim_js());
+    let shim = format!(
+        "<script>window.{GATEWAY_ORIGIN_GLOBAL}={};{}</script>",
+        js_string_literal(origin),
+        crate::web_shim::shim_js()
+    );
     match text.replacen("<head>", &format!("<head>{shim}"), 1) {
         replaced if replaced != text => replaced.into_bytes(),
         // 没有 <head>（结构被改坏）也别让面板整页失效：追加到末尾兜底
-        _ => format!("{text}<script>{}</script>", crate::web_shim::shim_js()).into_bytes(),
+        _ => format!("{text}{shim}").into_bytes(),
     }
+}
+
+/// 把字符串安全地包成 JS 双引号字面量（注入的是内联脚本，不能让值逃逸）。
+fn js_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// 扩展名 → content-type（界面用到的固定集合，其余按二进制流处理）

@@ -546,7 +546,10 @@ pub fn panel_router(state: ServerState) -> Router {
 
     // 静态托管只在 headless 打开（set_ui_dir）：桌面形态的界面由 Tauri 壳出，
     // 网关的未知路径保持纯 404。ui_dir 是启动即定值，克隆进闭包。
+    // 网关端口一并带进去：界面要展示的是 `/v1` 的真实端口，分端口部署时
+    // 它与面板端口不同（见 static_files::gateway_origin）。
     let ui_dir = state.ui_dir().cloned();
+    let gateway_port = state.port;
     Router::new()
         .merge(public)
         .merge(protected)
@@ -554,7 +557,7 @@ pub fn panel_router(state: ServerState) -> Router {
             let ui_dir = ui_dir.clone();
             async move {
                 match ui_dir {
-                    Some(dir) => super::static_files::serve(request, dir).await,
+                    Some(dir) => super::static_files::serve(request, dir, gateway_port).await,
                     None => not_found(request).await,
                 }
             }
