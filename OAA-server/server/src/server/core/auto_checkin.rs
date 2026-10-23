@@ -61,11 +61,18 @@ pub const DEFAULT_TIME: &str = "00:01";
 ///     排除。中国版里 Free 套餐账号也可能没有被下发活动（实测如此），那种情况
 ///     实现返回一条中性结果（「当前没有可领取的签到活动」），不算失败。
 ///
+///   - **Trae**：ug 族 `checkin_credits` 链路（`providers::trae::checkin::run_round`）。
+///     它是**唯一不走** `billing::checkin::run_checkin` 的签到家——签到是
+///     「status 预检 → 需要才签」两段式、带拥挤 9074 当天去重与账号间隔，
+///     形状与其余家「一次请求」不同，所以 `fire` 里按 provider 分派：选中 trae
+///     时直调 `run_round`，其余走通用链。定点轮原先由 `trae::checkin::spawn_daily`
+///     自带（进程内存去重），现已折叠进本调度器（`lastFiredDate` 统一去重）。
+///
 /// 这是「有签到活动」的清单，不是「有积分概念」的清单：CatPaw 有积分查询但
 /// 没有签到，因此不在此列 —— 它的账号在批量签到里被算作 `skipped`。
 /// 加一家之前先确认它的签到链路真的存在（一个点了必然报错的复选框比没有更糟）。
-pub const CHECKIN_PROVIDERS: [&str; 5] =
-    ["workbuddy", "raccoon", "autoclaw", "autoclaw-intl", "qoder"];
+pub const CHECKIN_PROVIDERS: [&str; 6] =
+    ["workbuddy", "raccoon", "autoclaw", "autoclaw-intl", "qoder", "trae"];
 
 /// 缺省的签到提供商集合（全选）
 pub fn default_providers() -> Vec<String> {
@@ -97,6 +104,7 @@ fn provider_label(id: &str) -> &str {
     match id {
         "workbuddy" => "WorkBuddy 国内版",
         "qoder" => "Qoder 中国版",
+        "trae" => "Trae",
         other => crate::server::core::providers::PROVIDERS
             .iter()
             .find(|meta| meta.id == other)
@@ -420,6 +428,14 @@ impl AutoCheckin {
     ///
     /// 返回 None 的两种情形（Node 同）：① 已有一次在跑（本次跳过）；
     /// ② 执行抛错。路由层据此把 ① 翻成「签到正在执行中，请稍候」。
+    ///
+    /// ── 按 provider 分派（2026-10-23 折叠 Trae 定点轮）──────────
+    /// 其余家（WorkBuddy / 小浣熊 / AutoClaw / Qoder）走通用链
+    /// `billing::checkin::run_checkin`（一次请求、靠 `supports_checkin` 过滤）；
+    /// Trae 走自带 `trae::checkin::run_round`（status 预检 → 需要才签、
+    /// 拥挤 9074 当天去重、账号间隔）—— 形状不同，不能塞进 `run_checkin` 的
+    /// 单账号分派。两段结果合并成一份 `lastResult`（口径略粗：跨两种机制，
+    /// 但 lastResult 只作展示、不参与决策）。
     pub async fn fire(&self, reason: &str) -> Option<Value> {
         // 先抢「执行中」标记；抢不到说明上一次还在跑
         let guard = {
@@ -438,70 +454,71 @@ impl AutoCheckin {
         write_state(json!({ "lastFiredDate": today }));
         logging::log("[Checkin]", &format!("⏰ 定时签到开始（{reason}）"));
 
-        // 定时签到是「到点触发」⇒ source = daily（与 Trae 定点轮同一档）
-        let outcome = match checkin::run_checkin(
-            &self.store,
-            &self.billing,
-            read_state().providers.as_slice(),
-            None,
-            "daily",
-        )
-        .await
-        {
-            Ok(result) => Some(self.record_success(&result, &today, reason)),
-            Err(error) => {
-                // 失败也写 lastResult（failed 里放错误文案），与 Node 的 catch 分支一致
-                write_state(json!({
-                    "lastResult": {
-                        "at": logging::now_ms(),
-                        "date": today,
-                        "reason": reason,
-                        "succeeded": 0,
-                        "total": 0,
-                        "skipped": 0,
-                        "failed": [error.message.clone()],
-                        "failedCount": 1,
-                    }
-                }));
-                logging::log("[Checkin]", &format!("❌ 定时签到失败: {}", error.message));
-                None
-            }
-        };
-        drop(guard);
-        outcome
-    }
+        let providers = read_state().providers;
+        let trae_selected = providers.iter().any(|p| p == "trae");
+        let others: Vec<String> = providers.iter().filter(|p| *p != "trae").cloned().collect();
 
-    /// 成功分支：汇总 + 记录 lastResult + 日志（对应 Node fire 里的 try 主体）
-    fn record_success(&self, result: &Value, today: &str, reason: &str) -> Value {
-        let number = |key: &str| {
-            result
-                .get(key)
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-        };
-        let succeeded = number("succeeded");
-        let total = number("total");
-        let skipped = number("skipped");
-        // 失败明细：`名字（错误）`，名字缺失时退到 id，再退到「未知账号」
-        let failures: Vec<String> = result
-            .get("results")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| {
-                        let error = item.get("error").and_then(Value::as_str)?;
-                        let name = item
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .filter(|text| !text.is_empty())
-                            .or_else(|| item.get("id").and_then(Value::as_str))
-                            .unwrap_or("未知账号");
-                        Some(format!("{name}（{error}）"))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut succeeded = 0u64;
+        let mut total = 0u64;
+        let mut skipped = 0u64;
+        let mut failures: Vec<String> = Vec::new();
+
+        // ── 其余提供商：通用签到链（一次请求、串行防风）──────────────
+        if !others.is_empty() {
+            match checkin::run_checkin(&self.store, &self.billing, &others, None, "daily").await {
+                Ok(result) => {
+                    succeeded += result.get("succeeded").and_then(Value::as_u64).unwrap_or(0);
+                    total += result.get("total").and_then(Value::as_u64).unwrap_or(0);
+                    skipped += result.get("skipped").and_then(Value::as_u64).unwrap_or(0);
+                    if let Some(items) = result.get("results").and_then(Value::as_array) {
+                        for item in items {
+                            let Some(error) = item
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .filter(|text| !text.is_empty())
+                            else {
+                                continue;
+                            };
+                            let name = item
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .filter(|text| !text.is_empty())
+                                .or_else(|| item.get("id").and_then(Value::as_str))
+                                .unwrap_or("未知账号");
+                            failures.push(format!("{name}（{error}）"));
+                        }
+                    }
+                }
+                Err(error) => failures.push(error.message),
+            }
+        }
+
+        // ── Trae：自带 run_round（status 预检 → 需要才签）──────────
+        if trae_selected {
+            let gap = config::current().trae_checkin_gap_minutes();
+            match crate::server::core::providers::trae::checkin::run_round(
+                &self.store,
+                gap,
+                None,
+                "daily",
+            )
+            .await
+            {
+                Ok(summary) => {
+                    succeeded += summary.ok as u64;
+                    total += (summary.ok + summary.already + summary.failed + summary.crowded) as u64;
+                    failures.extend(
+                        summary
+                            .outcomes
+                            .iter()
+                            .filter(|outcome| outcome.status == "fail")
+                            .map(|outcome| format!("{} · {}", outcome.name, outcome.message)),
+                    );
+                }
+                Err(message) => failures.push(message),
+            }
+        }
+
         let summary = json!({
             "at": logging::now_ms(),
             "date": today,
@@ -526,7 +543,8 @@ impl AutoCheckin {
                 },
             ),
         );
-        summary
+        drop(guard);
+        Some(summary)
     }
 
     // ─── 调度 ───────────────────────────────────────────────
@@ -728,5 +746,48 @@ pub fn init_global(service: AutoCheckin) -> AutoCheckin {
 pub fn stop_global() {
     if let Some(service) = GLOBAL.get() {
         service.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 钉住「Trae 折叠进 auto_checkin 后真的进了清单与缺省选择」。
+    //!
+    //! `fire` 里按 provider 分派：选中 trae 才调 `run_round`、否则只走通用链。
+    //! 三处（`CHECKIN_PROVIDERS` / `provider_label` / `normalize_providers`）任缺
+    //! 一个的表现都不是报错：复选框不出现、或出现了但读到的清单永远不含 trae
+    //! （定点轮因此永远不签 trae）—— 都是最难排查的那类，所以用断言钉住。
+    //! 与 `scheduled_tasks::tests::codearts_welfare_task_is_registered_and_wired`
+    //! 同款理由。
+
+    use super::*;
+
+    #[test]
+    fn trae_is_a_checkin_provider() {
+        assert!(
+            CHECKIN_PROVIDERS.contains(&"trae"),
+            "Trae 折叠进 auto_checkin 后必须在 CHECKIN_PROVIDERS 里",
+        );
+        assert_eq!(provider_label("trae"), "Trae");
+    }
+
+    #[test]
+    fn trae_is_selected_by_default() {
+        let providers = default_providers();
+        assert!(
+            providers.iter().any(|id| id == "trae"),
+            "缺省全选必须含 trae，否则定点轮默认不签 trae",
+        );
+    }
+
+    #[test]
+    fn normalize_providers_keeps_trae_and_drops_unknowns() {
+        // 顺序以 CHECKIN_PROVIDERS 为准（不是输入顺序）—— qoder 在 trae 之前
+        let picked = normalize_providers(Some(&json!(["trae", "bogus", "qoder"])));
+        assert_eq!(
+            picked,
+            vec!["qoder".to_string(), "trae".to_string()],
+            "只认注册过的 id（去重、按注册顺序），未知值丢掉",
+        );
     }
 }

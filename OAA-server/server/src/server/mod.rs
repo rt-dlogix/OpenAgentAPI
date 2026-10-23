@@ -431,10 +431,9 @@ impl ServerState {
             store.clone(),
             billing.clone(),
         ));
-        // Trae 的**定点签到**循环（2026-10-10）：与 auto_checkin 同构（轮询 + 当天
-        // 去重 + 启动补签），只是它调 `trae::checkin::run_round`。与「间隔型」的
-        // `traeCheckin` 任务并存 —— 定点负责到点就签、间隔负责兜底，两者都幂等。
-        core::providers::trae::checkin::spawn_daily(store.clone());
+        // Trae 的定点签到已折叠进 auto_checkin（2026-10-23）：它现在是 auto_checkin
+        // 的一个签到家（`fire` 里按 provider 直调 `trae::checkin::run_round`），
+        // 不再单独起循环。间隔兜底仍由 `scheduled_tasks` 的 `traeCheckin` 任务承担。
         // 更新管理器：下载目录 `{config_dir}/updates`，与壳侧 update::download_dir() 同源
         let update = core::update::init_global(UpdateManager::new(config_dir.clone()));
 

@@ -249,6 +249,11 @@ impl RuntimeConfig {
     }
 
     /// Trae 签到：定点时刻（`HH:MM`；空串 = 不启用定点）。
+    ///
+    /// **已弃用（2026-10-23）**：Trae 定点签到已折叠进 `auto_checkin`，
+    /// 定点时刻统一走 `autoCheckin.time`，本字段不再被任何调度路径读取。
+    /// 保留是为不破坏旧 config.json（config.rs 保留未知字段契约），新代码不要用。
+    #[allow(dead_code)]
     pub fn trae_checkin_time(&self) -> &str {
         &self.trae_checkin_time
     }
@@ -523,9 +528,9 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .filter(|value| CODEARTS_THINKING_LEVELS.contains(value))
             .unwrap_or_default()
             .to_string(),
-        // Trae 定点时刻：只认 `HH:MM`（00:00-23:59），其余（含空串）一律回落默认。
-        // 空串**不是**合法配置值 —— 想关定点就把 enabled 关掉，别用空串表达
-        //（空串与「没配过」无法区分，会让「关掉」变成「回到默认 09:00」）。
+        // Trae 定点时刻：**已弃用（2026-10-23）**——定点签到折叠进 auto_checkin 后，
+        // 时刻统一走 `autoCheckin.time`。这里仍解析旧字段只为不丢用户旧配置，
+        // 解析出来的值不会被任何调度路径读取。保留 is_hhmm 校验以免脏值带进内存。
         trae_checkin_time: raw
             .get(KEY_TRAE_CHECKIN_TIME)
             .and_then(Value::as_str)
@@ -1401,6 +1406,9 @@ fn is_hhmm(value: &str) -> bool {
     )
 }
 
+/// **已弃用（2026-10-23）**：Trae 定点时刻统一到 `autoCheckin.time`，本函数
+/// 不再被任何路径调用。保留是为旧客户端兼容，新代码不要用。
+#[allow(dead_code)]
 pub fn set_trae_checkin_time(time: &str) -> bool {
     update(|config| {
         config

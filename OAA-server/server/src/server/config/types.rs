@@ -488,6 +488,9 @@ pub const KEY_TRAE_CHECKIN_GAP_MINUTES: &str = "traeCheckinGapMinutes";
 /// 与「间隔型」的 `traeCheckin` 任务**并存**（2026-10-10 用户选择「定点 + 间隔都留」）：
 /// 定点负责「到点就签」（直观），间隔负责兜底（万一定点那轮失败，下一轮还能补）。
 /// 两者都调同一个 `run_round`，靠服务端 `checked_in` 幂等 ⇒ 不会重复签。
+///
+/// **已弃用（2026-10-23）**：Trae 定点签到折叠进 `auto_checkin` 后，定点时刻统一
+/// 走 `autoCheckin.time`，本键不再被任何调度路径读取。仍解析只为保留旧 config.json。
 pub const KEY_TRAE_CHECKIN_TIME: &str = "traeCheckinTime";
 /// 定点时刻的默认值。09:00 是「一天开始后、用户多半已开机」的稳妥点。
 pub const TRAE_CHECKIN_TIME_DEFAULT: &str = "09:00";
