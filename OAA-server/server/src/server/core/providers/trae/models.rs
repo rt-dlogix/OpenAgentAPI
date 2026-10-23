@@ -42,6 +42,20 @@
 //! 而不是补一个 0 —— 写 0 进 `/v1/models` 会被客户端当真上限，
 //! 进而把 `max_output_tokens: 0` 发给上游。
 //!
+//! ⚠️ **一处刻意的例外：上下文窗口与输出上限按账号真实能力广告，不照抄目录。**
+//! 目录的 `context_window_tokens.dev` 恒为上游给普通账号的默认档（200000），
+//! 而实测同一账号经本通道 **1,022,239 token 输入正常返回**，1,100,000 才回流内
+//! `4022 "prompt tokens have exceeded the maximum limit"`。按 200000 广告会让
+//! 下游在 1/5 处就开始丢历史。桌面端客户端也不按目录走：它把
+//! `model_info.prompt_max_tokens` 填成 936000（= 1M − 64000 输出）。
+//! 取值见 [`CONTEXT_WINDOW_ADVERTISED`] / [`MAX_OUTPUT_ADVERTISED`]。
+//!
+//! 上游**不校验任何档位字段**（连目录请求体里的 `mode_type` 传 0/1/2 都给出
+//! 完全相同的表），它只按实际 token 数判 —— 所以抬高广告值既不改变转发行为，
+//! 也不会让上游多收费（按实际用量计）。桌面端的「更大上下文（Max）」开关
+//! 只改元数据上报里的 `user_message_context.mode_type`（0=关 / 2=开），
+//! **不进对话请求体**，与本模块无关。
+//!
 //! `display_config.multimodal`（识图能力）**也是端到端实测确认过才接的**：
 //! 同一张 64×64 双色 PNG（上半红、下半蓝）以 `data:` URL 送进本家这条
 //! `solo_work_lite` 通道，判据是"答对颜色的只有标 true 的那几个"。
@@ -75,6 +89,30 @@ use super::{AGENT_BASE_URL, MODELS_PATH};
 
 /// 远程目录缓存有效期（与另外几家同为 1 小时；上游改表不需要秒级可见）。
 const CACHE_TTL_MS: i64 = 60 * 60 * 1000;
+
+/// 广告给下游的上下文窗口：**账号真实能力，不是目录默认值**。
+///
+/// 目录里 `context_window_tokens.dev` 是上游给所有普通账号的默认值（200000），
+/// 但实测同一账号经本家通道 **1,022,239 token 输入正常返回**，1,100,000 才回
+/// 流内 `4022 "prompt tokens have exceeded the maximum limit"`。
+/// ⇒ 200K 是默认档的读数，不是这条通道的能力上限；按它广告会让下游在
+/// 1/5 处就开始丢历史。
+///
+/// 客户端自己也印证这一点：桌面端把 `model_info.prompt_max_tokens` 填成
+/// **936000**（= 1M − 64000 输出），与目录给的 168000 无关 —— 那个值是客户端
+/// 按账号权益本地算的。`prompt_max_tokens + max_tokens = 上下文窗口` 这条等式
+/// 在全部目录条目上成立（`custom_model_1M`: 936000 + 64000 = 1000000）。
+///
+/// ⚠️ 上游**不校验任何档位字段**，只按实际 token 数判 —— 所以广告 1M
+/// 不会让上游多收钱（它本来就按实际用量算），转发也不受影响。
+const CONTEXT_WINDOW_ADVERTISED: i64 = 1_000_000;
+
+/// 广告给下游的输出上限：与上面的 1M 档配套（`custom_model_1M` 的
+/// `model_detail_list[].max_tokens` 就是 64000）。
+///
+/// ⚠️ 这只是**广告值**。请求体里没带 `max_tokens` 时，出站走
+/// `payload::DEFAULT_MAX_TOKENS`，与这里无关。
+const MAX_OUTPUT_ADVERTISED: i64 = 64_000;
 
 /// 广告 id 的后缀（见模块头"广告名带 `-solo` 后缀"）。
 pub const ADVERTISE_SUFFIX: &str = "-solo";
@@ -177,11 +215,24 @@ pub fn parse_catalog(payload: &Value) -> Vec<Value> {
         let mut item = catalog_entry(&config_name, &display_name, entry);
         // 只有目录真给了这些数才写对应的键（缺值写 0 = 谎报上限，见模块头）。
         if let Some(object) = item.as_object_mut() {
+            // 窗口按账号真实能力广告（见 CONTEXT_WINDOW_ADVERTISED），不按目录的
+            // `dev`：目录值永远是 200000，而这条通道实测能吃 1M。
+            // `context` 仍参与判定：上游整条没给窗口时（context == 0）保持沉默，
+            // 不替它编一个值。目录的 `max` 档若比常量更大，以目录为准。
             if context > 0 {
-                object.insert("maxInputTokens".to_string(), Value::from(context));
+                let advertised = entry
+                    .get("context_window_tokens")
+                    .and_then(|window| window.get("max"))
+                    .and_then(value_as_i64)
+                    .filter(|value| *value > CONTEXT_WINDOW_ADVERTISED)
+                    .unwrap_or(CONTEXT_WINDOW_ADVERTISED)
+                    .max(context);
+                object.insert("maxInputTokens".to_string(), Value::from(advertised));
             }
-            if let Some(output) = max_output_tokens(entry) {
-                object.insert("maxOutputTokens".to_string(), Value::from(output));
+            // 输出上限同理：目录给的是默认档（多为 32000），1M 档配套 64000。
+            // 仍守住「上游没给就别写」的纪律，只在目录有 `max_tokens` 时才抬高。
+            if max_output_tokens(entry).is_some() {
+                object.insert("maxOutputTokens".to_string(), Value::from(MAX_OUTPUT_ADVERTISED));
             }
             if let Some(reasoning) = supports_reasoning(entry) {
                 object.insert("supportsReasoning".to_string(), Value::from(reasoning));
@@ -390,8 +441,23 @@ mod tests {
                 index + 1
             );
             assert_eq!(entry["name"].as_str().unwrap(), line["name"].as_str().unwrap());
-            let context = line.get("maxInputTokens").and_then(Value::as_i64).unwrap_or(0);
-            assert_eq!(entry["contextWindow"].as_i64().unwrap(), context, "{} 的上下文窗口不对", entry["id"].as_str().unwrap());
+            // ⚠️ **有记录的偏离（第二处）**：参考实现把目录的 `context_window_tokens.dev`
+            // 直接当窗口广告，本家改成按账号真实能力广告 1M。判据是「目录给了窗口
+            // 就有广告值」而不是「值等于 dev」—— dev 是默认档，实测同一账号能吃
+            // 1M（见 CONTEXT_WINDOW_ADVERTISED）。目录整条没给窗口的仍不给键。
+            let want_window = entry["contextWindow"].as_i64().unwrap_or(0);
+            let got_window = line.get("maxInputTokens").and_then(Value::as_i64);
+            if want_window > 0 {
+                assert_eq!(
+                    Some(CONTEXT_WINDOW_ADVERTISED),
+                    got_window,
+                    "{} 的上下文窗口要按账号真实能力广告（目录值 {} 是默认档）",
+                    entry["id"].as_str().unwrap(),
+                    want_window
+                );
+            } else {
+                assert!(got_window.is_none(), "{} 上游没给窗口时不该有键", entry["id"].as_str().unwrap());
+            }
             // 卷里 `maxTokens` **恒为 0**（参考实现不读明文的 `model_detail_list[].max_tokens`，
             // 只看到密文的 encrypted_model_params 就放弃了）。这里把这条事实读出来
             // 并断言它，是为了让"我们不跟"是一个**有记录的偏离**而不是静默分叉：
@@ -473,11 +539,20 @@ mod tests {
         .expect("fixture 是 JSON");
         let models = parse_catalog(&payload);
         assert_eq!(3, models.len());
-        assert_eq!(Some(32000), models[0]["maxOutputTokens"].as_i64());
+        assert_eq!(Some(64000), models[0]["maxOutputTokens"].as_i64(), "输出上限按 1M 档广告（不再照抄目录的 32000）");
         assert_eq!(Some(true), models[0]["supportsReasoning"].as_bool());
         assert_eq!(Some(true), models[0]["supportsToolCall"].as_bool());
-        assert_eq!(Some(200000), models[0]["maxInputTokens"].as_i64(), "窗口仍取 context_window_tokens.dev");
-        assert_eq!(Some(16000), models[1]["maxOutputTokens"].as_i64());
+        assert_eq!(
+            Some(1_000_000),
+            models[0]["maxInputTokens"].as_i64(),
+            "窗口按账号真实能力广告 1M，不按目录的 dev=200000（实测 1,022,239 token 能过）"
+        );
+        assert_eq!(
+            Some(1_000_000),
+            models[2]["maxInputTokens"].as_i64(),
+            "目录 dev=300000 也统一抬到 1M —— 同一条通道同一份额度"
+        );
+        assert_eq!(Some(64000), models[1]["maxOutputTokens"].as_i64());
         assert_eq!(Some(false), models[1]["supportsReasoning"].as_bool(), "chat_model 要如实标 false");
         assert_eq!(Some(true), models[0]["supportsImages"].as_bool(), "multimodal=true 要接出来");
         assert_eq!(Some(true), models[1]["supportsImages"].as_bool(), "agnes 也标了 true（识图与 capability 是两个维度）");
@@ -488,12 +563,48 @@ mod tests {
             models[1]["supportsToolCall"].as_bool(),
             "extra_config 没这个键时按 true 兜底（本家通道实测收 tools）"
         );
-        assert_eq!(
-            Some(24000),
-            models[2]["maxOutputTokens"].as_i64(),
-            "一个 config 有多条 detail 时取**最小**：广告出去的上限两条档位都得能用"
-        );
         assert!(models[2].get("supportsReasoning").is_none(), "capability 空串 = 上游没说，不写键");
+    }
+
+    #[test]
+    fn the_advertised_window_follows_the_account_not_the_catalog_default() {
+        // 目录的 `dev` 恒为默认档；`max` 若更大则以目录为准（上游真给了更高档就听它的）。
+        let payload: Value = serde_json::from_str(
+            r#"{"config_info_list":[
+              {"config_name":"plain","config_switch":true,"context_window_tokens":{"dev":200000},
+               "display_config":{"display_name":"Plain"},
+               "model_detail_list":[{"model_name":"plain","max_tokens":32000}]},
+              {"config_name":"has-max","config_switch":true,"context_window_tokens":{"dev":200000,"max":2000000},
+               "display_config":{"display_name":"HasMax"},
+               "model_detail_list":[{"model_name":"has-max","max_tokens":32000}]},
+              {"config_name":"no-window","config_switch":true,
+               "display_config":{"display_name":"NoWindow"},
+               "model_detail_list":[{"model_name":"nw","max_tokens":32000}]},
+              {"config_name":"no-output","config_switch":true,"context_window_tokens":{"dev":200000},
+               "display_config":{"display_name":"NoOutput"}}
+            ]}"#,
+        )
+        .expect("fixture 是 JSON");
+        let models = parse_catalog(&payload);
+        assert_eq!(4, models.len());
+        assert_eq!(
+            Some(1_000_000),
+            models[0]["maxInputTokens"].as_i64(),
+            "目录 dev=200000 是默认档，实际能力 1M"
+        );
+        assert_eq!(
+            Some(2_000_000),
+            models[1]["maxInputTokens"].as_i64(),
+            "目录 max 档比常量更大时以目录为准"
+        );
+        assert!(
+            models[2].get("maxInputTokens").is_none(),
+            "上游整条没给窗口时保持沉默，不替它编一个"
+        );
+        assert!(
+            models[3].get("maxOutputTokens").is_none(),
+            "上游没给 max_tokens 时不写输出上限"
+        );
     }
 
     #[test]
